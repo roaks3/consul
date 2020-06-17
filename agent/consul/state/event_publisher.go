@@ -12,8 +12,12 @@ import (
 	"github.com/hashicorp/consul/agent/structs"
 )
 
+type readTxner interface {
+	ReadTxn() *txn
+}
+
 type EventPublisher struct {
-	store *Store
+	db readTxner
 
 	// topicBufferSize controls how many trailing events we keep in memory for
 	// each topic to avoid needing to snapshot again for re-connecting clients
@@ -58,9 +62,9 @@ type commitUpdate struct {
 	events []stream.Event
 }
 
-func NewEventPublisher(store *Store, topicBufferSize int, snapCacheTTL time.Duration) *EventPublisher {
+func NewEventPublisher(db readTxner, topicBufferSize int, snapCacheTTL time.Duration) *EventPublisher {
 	e := &EventPublisher{
-		store:           store,
+		db:              db,
 		topicBufferSize: topicBufferSize,
 		snapCacheTTL:    snapCacheTTL,
 		topicBuffers:    make(map[stream.Topic]*stream.EventBuffer),
@@ -92,7 +96,7 @@ func (e *EventPublisher) publishChanges(tx *txn, changes memdb.Changes) error {
 		// thread. Transactions aren't thread safe but it's OK to create it here
 		// since we won't try to use it in this thread and pass it straight to the
 		// handler which will own it exclusively.
-		tx:     e.store.db.Txn(false),
+		tx:     e.db.ReadTxn(),
 		events: events,
 	}
 	return nil
