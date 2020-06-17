@@ -42,10 +42,6 @@ type EventPublisher struct {
 	// TODO: new struct for snapCache and snapFns and snapCacheTTL
 	snapCache map[stream.Topic]map[string]*stream.EventSnapshot
 
-	// snapFns is the set of snapshot functions that were registered bound to the
-	// state store.
-	snapFns map[stream.Topic]stream.SnapFn
-
 	// subsByToken stores a list of Subscription objects outstanding indexed by a
 	// hash of the ACL token they used to subscribe so we can reload them if their
 	// ACL permissions change.
@@ -69,18 +65,8 @@ func NewEventPublisher(store *Store, topicBufferSize int, snapCacheTTL time.Dura
 		snapCacheTTL:    snapCacheTTL,
 		topicBuffers:    make(map[stream.Topic]*stream.EventBuffer),
 		snapCache:       make(map[stream.Topic]map[string]*stream.EventSnapshot),
-		snapFns:         make(map[stream.Topic]stream.SnapFn),
 		subsByToken:     make(map[string]map[*stream.SubscribeRequest]*stream.Subscription),
 		publishCh:       make(chan commitUpdate, 64),
-	}
-
-	// create a local handler table
-	// TODO: document why
-	for topic, handlers := range topicRegistry {
-		fnCopy := handlers.Snapshot
-		e.snapFns[topic] = func(req *stream.SubscribeRequest, buf *stream.EventBuffer) (uint64, error) {
-			return fnCopy(e.store, req, buf)
-		}
 	}
 
 	go e.handleUpdates()
@@ -92,7 +78,7 @@ func (e *EventPublisher) publishChanges(tx *txn, changes memdb.Changes) error {
 	var events []stream.Event
 	for topic, th := range topicRegistry {
 		if th.ProcessChanges != nil {
-			es, err := th.ProcessChanges(e.store, tx, changes)
+			es, err := th.ProcessChanges(tx, changes)
 			if err != nil {
 				return fmt.Errorf("failed generating events for topic %q: %s", topic, err)
 			}
@@ -342,12 +328,12 @@ func (e *EventPublisher) getSnapshotLocked(req *stream.SubscribeRequest, topicHe
 	}
 
 	// No snap or errored snap in cache, create a new one
-	snapFn, ok := e.snapFns[req.Topic]
+	handler, ok := topicRegistry[req.Topic]
 	if !ok {
 		return nil, fmt.Errorf("unknown topic %s", req.Topic)
 	}
 
-	snap = stream.NewEventSnapshot(req, topicHead, snapFn)
+	snap = stream.NewEventSnapshot(req, topicHead, handler.Snapshot)
 	if e.snapCacheTTL > 0 {
 		topicSnaps[req.Key] = snap
 
