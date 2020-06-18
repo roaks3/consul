@@ -362,10 +362,6 @@ func (d *testServerDelegate) blockingQuery(
 	return err
 }
 
-func newFakeStateStore() (*state.Store, error) {
-	return state.NewStateStore(nil)
-}
-
 func (d *testServerDelegate) IsLeader() bool {
 	return d.isLeader
 }

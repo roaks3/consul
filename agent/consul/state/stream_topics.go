@@ -5,19 +5,19 @@ import (
 	memdb "github.com/hashicorp/go-memdb"
 )
 
-// topicHandlers describes the methods needed to process a streaming
-// subscription for a given topic.
-type topicHandlers struct {
-	Snapshot       func(*stream.SubscribeRequest, *stream.EventBuffer) (uint64, error)
+// topicHandler provides functions which create stream.Events for a topic.
+type topicHandler struct {
+	// Snapshot creates the necessary events to reproduce the current state and
+	// appends them to the EventBuffer.
+	Snapshot func(*stream.SubscribeRequest, *stream.EventBuffer) (index uint64, err error)
+	// ProcessChanges accepts a slice of Changes, and builds a slice of events for
+	// those changes.
 	ProcessChanges func(*txn, memdb.Changes) ([]stream.Event, error)
 }
 
-// topicRegistry is a map of topic handlers. It must only be written to during
-// init().
-var topicRegistry map[stream.Topic]topicHandlers
-
-func init() {
-	topicRegistry = map[stream.Topic]topicHandlers{
+// newTopicHandlers returns the default handlers for state change events.
+func newTopicHandlers() map[stream.Topic]topicHandler {
+	return map[stream.Topic]topicHandler{
 		// For now we don't actually support subscribing to ACL* topics externally
 		// so these have no Snapshot methods yet. We do need to have a
 		// ProcessChanges func to publish the partial events on ACL changes though

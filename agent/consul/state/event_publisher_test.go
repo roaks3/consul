@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/consul/stream"
 	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/go-memdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -94,21 +95,49 @@ func assertReset(t *testing.T, eventCh <-chan nextResult, allowEOS bool) {
 	}
 }
 
+var (
+	topicTestingOne stream.Topic = 901
+	topicTestingTwo stream.Topic = 902
+)
+
+func newTestTopicHandlers() map[stream.Topic]topicHandler {
+	return map[stream.Topic]topicHandler{
+		topicTestingOne: {
+			ProcessChanges: func(t *txn, changes memdb.Changes) ([]stream.Event, error) {
+				return nil, nil
+			},
+			Snapshot: func(req *stream.SubscribeRequest, buffer *stream.EventBuffer) (uint64, error) {
+				event := stream.Event{
+					Topic:   req.Topic,
+					Key:     req.Key,
+					Index:   5,
+					Payload: nil,
+				}
+				buffer.Append([]stream.Event{event})
+				return 0, nil
+			},
+		},
+		topicTestingTwo: {
+			ProcessChanges: func(t *txn, changes memdb.Changes) ([]stream.Event, error) {
+				return nil, nil
+			},
+			Snapshot: func(req *stream.SubscribeRequest, buffer *stream.EventBuffer) (uint64, error) {
+				return 0, nil
+			},
+		},
+	}
+}
+
 func createTokenAndWaitForACLEventPublish(t *testing.T, s *Store) *structs.ACLToken {
-	// Token to use during this test.
 	token := &structs.ACLToken{
 		AccessorID:  "3af117a9-2233-4cf4-8ff8-3c749c9906b4",
 		SecretID:    "4268ce0d-d7ae-4718-8613-42eba9036020",
 		Description: "something",
 		Policies: []structs.ACLTokenPolicyLink{
-			structs.ACLTokenPolicyLink{
-				ID: testPolicyID_A,
-			},
+			{ID: testPolicyID_A},
 		},
 		Roles: []structs.ACLTokenRoleLink{
-			structs.ACLTokenRoleLink{
-				ID: testRoleID_B,
-			},
+			{ID: testRoleID_B},
 		},
 	}
 	token.SetHash(false)
@@ -123,14 +152,14 @@ func createTokenAndWaitForACLEventPublish(t *testing.T, s *Store) *structs.ACLTo
 	// so we know the initial token write event has been sent out before
 	// continuing...
 	subscription := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicTestingOne,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(s.db, 0, 0)
+	publisher := NewEventPublisher(newTestTopicHandlers(), 0)
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(t, err)
 
@@ -163,7 +192,7 @@ func TestEventPublisher_Publish_Success(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	publisher := NewEventPublisher(s.db, 0, 0)
+	publisher := NewEventPublisher(nil, 0)
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 
@@ -190,7 +219,7 @@ func TestEventPublisher_Publish_Success(t *testing.T) {
 	require.NotNil(sh, "expected service health event, got %v", e)
 }
 
-func TestPublisher_ACLTokenUpdate(t *testing.T) {
+func TestEventPublisher_Publish_ACLTokenUpdate(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	s := testACLTokensStateStore(t)
@@ -207,7 +236,7 @@ func TestPublisher_ACLTokenUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(s.db, 0, 0)
+	publisher := NewEventPublisher(nil, 0)
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 
@@ -270,7 +299,7 @@ func TestPublisher_ACLTokenUpdate(t *testing.T) {
 	require.Equal(stream.ErrSubscriptionReload, err)
 }
 
-func TestPublisher_ACLPolicyUpdate(t *testing.T) {
+func TestEventPublisher_Publish_ACLPolicyUpdate(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	s := testACLTokensStateStore(t)
@@ -287,7 +316,7 @@ func TestPublisher_ACLPolicyUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(s.db, 0, 0)
+	publisher := NewEventPublisher(nil, 0)
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 
@@ -383,7 +412,7 @@ func TestPublisher_ACLPolicyUpdate(t *testing.T) {
 	assertReset(t, eventCh, true)
 }
 
-func TestPublisher_ACLRoleUpdate(t *testing.T) {
+func TestEventPublisher_Publish_ACLRoleUpdate(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	s := testACLTokensStateStore(t)
@@ -400,7 +429,7 @@ func TestPublisher_ACLRoleUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(s.db, 0, 0)
+	publisher := NewEventPublisher(nil, 0)
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 

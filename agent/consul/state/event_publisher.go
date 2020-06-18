@@ -17,7 +17,7 @@ type readTxner interface {
 }
 
 type EventPublisher struct {
-	db readTxner
+	db *memdb.MemDB
 
 	// topicBufferSize controls how many trailing events we keep in memory for
 	// each topic to avoid needing to snapshot again for re-connecting clients
@@ -55,22 +55,22 @@ type EventPublisher struct {
 	// publishes events, so that publishing can happen asynchronously from
 	// the Commit call in the FSM hot path.
 	publishCh chan commitUpdate
+
+	handlers map[stream.Topic]topicHandler
 }
 
 type commitUpdate struct {
-	tx     *txn
+	tx     ReadTxn
 	events []stream.Event
 }
 
-func NewEventPublisher(db readTxner, topicBufferSize int, snapCacheTTL time.Duration) *EventPublisher {
+func NewEventPublisher(handlers map[stream.Topic]topicHandler, snapCacheTTL time.Duration) *EventPublisher {
 	e := &EventPublisher{
-		db:              db,
-		topicBufferSize: topicBufferSize,
-		snapCacheTTL:    snapCacheTTL,
-		topicBuffers:    make(map[stream.Topic]*stream.EventBuffer),
-		snapCache:       make(map[stream.Topic]map[string]*stream.EventSnapshot),
-		subsByToken:     make(map[string]map[*stream.SubscribeRequest]*stream.Subscription),
-		publishCh:       make(chan commitUpdate, 64),
+		snapCacheTTL: snapCacheTTL,
+		topicBuffers: make(map[stream.Topic]*stream.EventBuffer),
+		snapCache:    make(map[stream.Topic]map[string]*stream.EventSnapshot),
+		publishCh:    make(chan commitUpdate, 64),
+		handlers:     handlers,
 	}
 
 	go e.handleUpdates()
@@ -78,11 +78,11 @@ func NewEventPublisher(db readTxner, topicBufferSize int, snapCacheTTL time.Dura
 	return e
 }
 
-func (e *EventPublisher) publishChanges(tx *txn, changes memdb.Changes) error {
+func (e *EventPublisher) PublishChanges(tx *txn, changes memdb.Changes) error {
 	var events []stream.Event
-	for topic, th := range topicRegistry {
-		if th.ProcessChanges != nil {
-			es, err := th.ProcessChanges(tx, changes)
+	for topic, handler := range e.handlers {
+		if handler.ProcessChanges != nil {
+			es, err := handler.ProcessChanges(tx, changes)
 			if err != nil {
 				return fmt.Errorf("failed generating events for topic %q: %s", topic, err)
 			}
@@ -96,7 +96,7 @@ func (e *EventPublisher) publishChanges(tx *txn, changes memdb.Changes) error {
 		// thread. Transactions aren't thread safe but it's OK to create it here
 		// since we won't try to use it in this thread and pass it straight to the
 		// handler which will own it exclusively.
-		tx:     e.db.ReadTxn(),
+		tx:     e.db.Txn(false),
 		events: events,
 	}
 	return nil
@@ -170,7 +170,7 @@ func (e *EventPublisher) getTopicBuffer(topic stream.Topic) *stream.EventBuffer 
 // handleACLUpdate handles an ACL token/policy/role update. This method assumes
 // the lock is held.
 // TODO: testcases for this
-func (e *EventPublisher) handleACLUpdate(tx *txn, event stream.Event) error {
+func (e *EventPublisher) handleACLUpdate(tx ReadTxn, event stream.Event) error {
 	switch event.Topic {
 	case stream.Topic_ACLTokens:
 		token := event.Payload.(*structs.ACLToken)
@@ -239,7 +239,7 @@ func (e *EventPublisher) Subscribe(
 	req *stream.SubscribeRequest,
 ) (*stream.Subscription, error) {
 	// Ensure we know how to make a snapshot for this topic
-	_, ok := topicRegistry[req.Topic]
+	_, ok := e.handlers[req.Topic]
 	if !ok {
 		return nil, fmt.Errorf("unknown topic %d", req.Topic)
 	}
@@ -332,7 +332,7 @@ func (e *EventPublisher) getSnapshotLocked(req *stream.SubscribeRequest, topicHe
 	}
 
 	// No snap or errored snap in cache, create a new one
-	handler, ok := topicRegistry[req.Topic]
+	handler, ok := e.handlers[req.Topic]
 	if !ok {
 		return nil, fmt.Errorf("unknown topic %d", req.Topic)
 	}
