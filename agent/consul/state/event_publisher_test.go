@@ -95,35 +95,46 @@ func assertReset(t *testing.T, eventCh <-chan nextResult, allowEOS bool) {
 	}
 }
 
-var (
-	topicTestingOne stream.Topic = 901
-	topicTestingTwo stream.Topic = 902
-)
+var topicService stream.Topic = 901
 
-func newTestTopicHandlers() map[stream.Topic]topicHandler {
+func newTestTopicHandlers(s *Store) map[stream.Topic]topicHandler {
 	return map[stream.Topic]topicHandler{
-		topicTestingOne: {
+		topicService: {
 			ProcessChanges: func(t *txn, changes memdb.Changes) ([]stream.Event, error) {
-				return nil, nil
+				var events []stream.Event
+				for _, change := range changes {
+					if change.Table == "services" {
+						service := change.After.(*structs.ServiceNode)
+						events = append(events, stream.Event{
+							Topic:   topicService,
+							Key:     service.ServiceName,
+							Index:   t.Index,
+							Payload: service,
+						})
+					}
+				}
+				return events, nil
 			},
 			Snapshot: func(req *stream.SubscribeRequest, buffer *stream.EventBuffer) (uint64, error) {
-				event := stream.Event{
-					Topic:   req.Topic,
-					Key:     req.Key,
-					Index:   5,
-					Payload: nil,
+				idx, nodes, err := s.ServiceNodes(nil, req.Key, nil)
+				if err != nil {
+					return idx, err
 				}
-				buffer.Append([]stream.Event{event})
-				return 0, nil
+
+				for _, node := range nodes {
+					event := stream.Event{
+						Topic:   req.Topic,
+						Key:     req.Key,
+						Index:   node.ModifyIndex,
+						Payload: node,
+					}
+					buffer.Append([]stream.Event{event})
+				}
+				return idx, nil
 			},
 		},
-		topicTestingTwo: {
-			ProcessChanges: func(t *txn, changes memdb.Changes) ([]stream.Event, error) {
-				return nil, nil
-			},
-			Snapshot: func(req *stream.SubscribeRequest, buffer *stream.EventBuffer) (uint64, error) {
-				return 0, nil
-			},
+		stream.Topic_ACLTokens: {
+			ProcessChanges: aclEventsFromChanges,
 		},
 	}
 }
@@ -152,14 +163,15 @@ func createTokenAndWaitForACLEventPublish(t *testing.T, s *Store) *structs.ACLTo
 	// so we know the initial token write event has been sent out before
 	// continuing...
 	subscription := &stream.SubscribeRequest{
-		Topic: topicTestingOne,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(newTestTopicHandlers(), 0)
+	publisher := NewEventPublisher(ctx, newTestTopicHandlers(s), 0)
+	s.db.publisher = publisher
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(t, err)
 
@@ -174,25 +186,25 @@ func createTokenAndWaitForACLEventPublish(t *testing.T, s *Store) *structs.ACLTo
 	return token
 }
 
-func TestEventPublisher_Publish_Success(t *testing.T) {
-	t.Skip("TODO: replace service registration with test events")
+func TestEventPublisher_PublishChangesAndSubscribe_WithSnapshot(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
-	s := testStateStore(t)
+	store, err := NewStateStore(nil)
+	require.NoError(err)
 
-	// Register an initial instance
 	reg := structs.TestRegisterRequest(t)
 	reg.Service.ID = "web1"
-	require.NoError(s.EnsureRegistration(1, reg))
+	require.NoError(store.EnsureRegistration(1, reg))
 
 	// Register the subscription.
 	subscription := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   reg.Service.Service,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	publisher := NewEventPublisher(nil, 0)
+	publisher := NewEventPublisher(ctx, newTestTopicHandlers(store), 0)
+	store.db.publisher = publisher
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 
@@ -200,8 +212,8 @@ func TestEventPublisher_Publish_Success(t *testing.T) {
 
 	// Stream should get the instance and then EndOfSnapshot
 	e := assertEvent(t, eventCh)
-	sh := e.Payload // TODO: examine payload, instead of not-nil check
-	require.NotNil(sh, "expected service health event, got %v", e)
+	srv := e.Payload.(*structs.ServiceNode)
+	require.Equal(srv.ServiceID, "web1")
 	e = assertEvent(t, eventCh)
 	require.True(e.IsEndOfSnapshot())
 
@@ -209,14 +221,13 @@ func TestEventPublisher_Publish_Success(t *testing.T) {
 	assertNoEvent(t, eventCh)
 
 	// Add a new instance of service on a different node
-	reg2 := reg
-	reg2.Node = "node2"
-	require.NoError(s.EnsureRegistration(1, reg))
+	reg.Node = "node2"
+	require.NoError(store.EnsureRegistration(1, reg))
 
 	// Subscriber should see registration
 	e = assertEvent(t, eventCh)
-	sh = e.Payload // TODO: examine payload, instead of not-nil check
-	require.NotNil(sh, "expected service health event, got %v", e)
+	srv = e.Payload.(*structs.ServiceNode)
+	require.Equal(srv.Node, "node2")
 }
 
 func TestEventPublisher_Publish_ACLTokenUpdate(t *testing.T) {
@@ -229,14 +240,15 @@ func TestEventPublisher_Publish_ACLTokenUpdate(t *testing.T) {
 
 	// Register the subscription.
 	subscription := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(nil, 0)
+	publisher := NewEventPublisher(ctx, newTestTopicHandlers(s), 0)
+	s.db.publisher = publisher
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 
@@ -272,7 +284,7 @@ func TestEventPublisher_Publish_ACLTokenUpdate(t *testing.T) {
 
 	// Register another subscription.
 	subscription2 := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
@@ -309,14 +321,15 @@ func TestEventPublisher_Publish_ACLPolicyUpdate(t *testing.T) {
 
 	// Register the subscription.
 	subscription := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(nil, 0)
+	publisher := NewEventPublisher(ctx, newTestTopicHandlers(s), 0)
+	s.db.publisher = publisher
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 
@@ -356,7 +369,7 @@ func TestEventPublisher_Publish_ACLPolicyUpdate(t *testing.T) {
 
 	// Register another subscription.
 	subscription2 := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
@@ -384,7 +397,7 @@ func TestEventPublisher_Publish_ACLPolicyUpdate(t *testing.T) {
 
 	// Register another subscription.
 	subscription3 := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
@@ -422,14 +435,15 @@ func TestEventPublisher_Publish_ACLRoleUpdate(t *testing.T) {
 
 	// Register the subscription.
 	subscription := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	publisher := NewEventPublisher(nil, 0)
+	publisher := NewEventPublisher(ctx, newTestTopicHandlers(s), 0)
+	s.db.publisher = publisher
 	sub, err := publisher.Subscribe(ctx, subscription)
 	require.NoError(err)
 
@@ -465,7 +479,7 @@ func TestEventPublisher_Publish_ACLRoleUpdate(t *testing.T) {
 
 	// Register another subscription.
 	subscription2 := &stream.SubscribeRequest{
-		Topic: stream.Topic_ServiceHealth,
+		Topic: topicService,
 		Key:   "nope",
 		Token: token.SecretID,
 	}
