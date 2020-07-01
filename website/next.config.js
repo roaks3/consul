@@ -1,19 +1,15 @@
 const withHashicorp = require('@hashicorp/nextjs-scripts')
-const path = require('path')
 
 module.exports = withHashicorp({
   defaultLayout: true,
-  transpileModules: ['is-absolute-url', '@hashicorp/react-mega-nav'],
-  mdx: { resolveIncludes: path.join(__dirname, 'pages/partials') },
+  transpileModules: [
+    'is-absolute-url',
+    '@hashicorp/react-mega-nav',
+    'next-mdx-remote',
+  ],
 })({
   experimental: {
     modern: true,
-    rewrites: () => [
-      {
-        source: '/api/:path*',
-        destination: '/api-docs/:path*',
-      },
-    ],
   },
   // Note: These are meant to be public, it's not a mistake that they are here
   env: {
