@@ -4,3 +4,7 @@ node_modules
 out
 .mdx-data
 data/.tmp/*.js
+
+website/content/api-docs/api-docs-v*
+website/content/docs/docs-v*
+website/content/intro/intro-v*
