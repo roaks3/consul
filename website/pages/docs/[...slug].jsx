@@ -1,6 +1,4 @@
-import fs from 'fs'
 import path from 'path'
-import { promisify } from 'util'
 import matter from 'gray-matter'
 import Head from 'next/head'
 import Link from 'next/link'
@@ -57,9 +55,11 @@ export default function DocsDocsPage({
 export async function getStaticProps({ params }) {
   const filePath = `content/docs/${params.slug.join('/')}.mdx`
   const url = `docs/${params.slug.join('/')}`
-  const fileContent = (
-    await promisify(fs.readFile)(`${process.cwd()}/${filePath}`)
-  ).toString()
+  const fileContent = await (
+    await fetch(
+      `https://raw.githubusercontent.com/hashicorp/consul/stable-website/website/pages/${url}.mdx`
+    )
+  ).text()
 
   const { content, data } = matter(fileContent)
   const renderedContent = await renderToString(content, DEFAULT_COMPONENTS, {

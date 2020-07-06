@@ -1,6 +1,4 @@
-import fs from 'fs'
 import path from 'path'
-import { promisify } from 'util'
 import matter from 'gray-matter'
 import Head from 'next/head'
 import Link from 'next/link'
@@ -57,9 +55,13 @@ export default function ApiDocsPage({
 export async function getStaticProps({ params }) {
   const filePath = `content/api-docs/${params.slug.join('/')}.mdx`
   const url = `new-api-docs/${params.slug.join('/')}`
-  const fileContent = (
-    await promisify(fs.readFile)(`${process.cwd()}/${filePath}`)
-  ).toString()
+  const fileContent = await (
+    await fetch(
+      `https://raw.githubusercontent.com/hashicorp/consul/stable-website/website/pages/api-docs/${params.slug.join(
+        '/'
+      )}.mdx`
+    )
+  ).text()
 
   const { content, data } = matter(fileContent)
 
